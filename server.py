@@ -66,6 +66,7 @@ def connect_db():
             row_factory=postgres_row,
         )
         try:
+            connection.execute("SET LOCAL ROLE service_role")
             yield PostgresConnection(connection)
             connection.commit()
         except Exception:

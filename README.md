@@ -25,8 +25,10 @@ SQLite data is not altered by enabling Supabase.
    row-level security defaults, and the public `loop-listing-images` bucket.
 3. In the Supabase dashboard, copy the project URL, anon/public key, and a
    Postgres connection string. For Render or another IPv4-only host, use the
-Supabase session pooler connection string. URL-encode special characters
-in its password. Keep the database password and service-role key private.
+   Supabase session pooler connection string with the `postgres` database user.
+   The server switches each transaction to Supabase's `service_role` so its
+   trusted API operations can pass RLS; keep the database password and
+   service-role key private. URL-encode special characters in the password.
 4. To switch this local server to Supabase, fill in the private `.env` file in
    the project folder and change `LOOP_BACKEND` to `supabase`. It is ignored by
    Git and Docker; `.env.example` is the shareable template. Set:
