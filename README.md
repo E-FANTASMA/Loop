@@ -33,15 +33,15 @@ in its password. Keep the database password and service-role key private.
 
    - `LOOP_BACKEND=supabase`
    - `SUPABASE_URL`
-   - `SUPABASE_ANON_KEY`
-   - `SUPABASE_SERVICE_ROLE_KEY`
+   - `SUPABASE_PUBLISHABLE_KEY`
+   - `SUPABASE_SECRET_KEY`
    - `SUPABASE_DB_URL`
    - `LOOP_ADMIN_EMAIL` (optional moderator account email)
 
    Leave `SESSION_COOKIE_SECURE=false` for local HTTP. The server loads `.env`
    automatically; it will report missing Supabase settings until you fill them.
 
-   Never put the service-role key or database connection string in browser code,
+   Never put the secret key or database connection string in browser code,
    source control, or a public chat. On Render, set the values as private
    environment variables in the service settings.
 5. In Supabase Auth settings, set the application Site URL and allowed redirect
@@ -50,9 +50,9 @@ in its password. Keep the database password and service-role key private.
    restricts registration and login to `@pau.edu.ng`; Supabase Auth handles
    password storage, sessions, and optional verification.
 
-The app's server uses the Postgres connection string and service-role key only
+The app's server uses the Postgres connection string and secret key only
 on the server. Browser requests continue to go through the Loop API. The
-service-role key is privileged and must remain secret. Listing images are
+secret key is privileged and must remain secret. Listing images are
 stored in the public Supabase Storage bucket, so anyone with an image URL can
 view those images.
 
@@ -91,7 +91,7 @@ configuration or tables are missing.
    select its `render.yaml`. The blueprint configures the Docker web service
    to use Supabase. Add the requested environment values in Render's
    environment settings:
-   `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and
+   `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY`, and
    `SUPABASE_DB_URL`. Also set `LOOP_ADMIN_EMAIL` if you want a moderator.
    Use the Supabase session-pooler connection string for Render; store the
    database password only in Render's private environment settings.

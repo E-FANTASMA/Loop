@@ -28,8 +28,14 @@ if LOOP_BACKEND not in {"sqlite", "supabase"}:
     raise RuntimeError("LOOP_BACKEND must be either 'sqlite' or 'supabase'.")
 SUPABASE_MODE = LOOP_BACKEND == "supabase"
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
-SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
-SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_PUBLISHABLE_KEY = (
+    os.environ.get("SUPABASE_PUBLISHABLE_KEY")
+    or os.environ.get("SUPABASE_ANON_KEY", "")
+)
+SUPABASE_SECRET_KEY = (
+    os.environ.get("SUPABASE_SECRET_KEY")
+    or os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+)
 SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL", "")
 SUPABASE_IMAGE_BUCKET = "loop-listing-images"
 CATEGORIES = {"Furniture", "Books", "Tech", "Kitchen", "Other"}
@@ -91,11 +97,16 @@ class PostgresConnection:
         return self.connection.execute(query, values)
 
 
-def postgres_row(cursor, values):
-    return {
-        column.name: str(value) if isinstance(value, uuid.UUID) else value
-        for column, value in zip(cursor.description, values)
-    }
+def postgres_row(cursor):
+    columns = [column.name for column in cursor.description]
+
+    def make_row(values):
+        return {
+            name: str(value) if isinstance(value, uuid.UUID) else value
+            for name, value in zip(columns, values)
+        }
+
+    return make_row
 
 
 class SupabaseError(Exception):
@@ -109,12 +120,11 @@ def supabase_request(
     path, method="GET", payload=None, access_token=None, service_role=False,
     raw_body=None, content_type="application/json",
 ):
-    key = SUPABASE_SERVICE_ROLE_KEY if service_role else SUPABASE_ANON_KEY
-    headers = {
-        "apikey": key,
-        "Authorization": f"Bearer {access_token or key}",
-        "Accept": "application/json",
-    }
+    key = SUPABASE_SECRET_KEY if service_role else SUPABASE_PUBLISHABLE_KEY
+    headers = {"apikey": key, "Accept": "application/json"}
+    authorization = access_token or (key if key.startswith("eyJ") else None)
+    if authorization:
+        headers["Authorization"] = f"Bearer {authorization}"
     data = None
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
@@ -163,8 +173,8 @@ def initialize_db():
     if SUPABASE_MODE:
         required = {
             "SUPABASE_URL": SUPABASE_URL,
-            "SUPABASE_ANON_KEY": SUPABASE_ANON_KEY,
-            "SUPABASE_SERVICE_ROLE_KEY": SUPABASE_SERVICE_ROLE_KEY,
+            "SUPABASE_PUBLISHABLE_KEY": SUPABASE_PUBLISHABLE_KEY,
+            "SUPABASE_SECRET_KEY": SUPABASE_SECRET_KEY,
             "SUPABASE_DB_URL": SUPABASE_DB_URL,
         }
         missing = [name for name, value in required.items() if not value]
