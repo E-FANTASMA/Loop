@@ -72,6 +72,47 @@ existing SQLite database and its sample listings remain on disk. Supabase
 startup checks that the schema has been applied and fails with an error if
 configuration or tables are missing.
 
+## Paystack payments
+
+Paystack checkout is disabled by default. To test it, configure a Paystack
+test secret key and set:
+
+- `PAYSTACK_ENABLED=true`
+- `PAYSTACK_SECRET_KEY` to the server-only Paystack test secret key
+- `PAYSTACK_CALLBACK_URL` to the public Loop URL, including its trailing `/`
+
+Configure the Paystack webhook URL as
+`https://<your-loop-domain>/api/paystack/webhook` and subscribe to
+`charge.success`. The server verifies both the webhook signature and the
+transaction reference, amount, and NGN currency before marking an order paid.
+Never put the Paystack secret key in browser code or commit it.
+
+Sellers must open **Orders & payouts** and link a Nigerian bank account before
+their sale listings can be purchased. Paystack resolves the account and creates
+a seller subaccount; Loop stores the Paystack subaccount code and verified
+account name, not the account number.
+
+For paid sales, Loop sets a fixed Paystack split charge:
+
+| Listing price | Loop fee |
+| --- | ---: |
+| ₦1–₦10,000 | ₦200 |
+| ₦10,001–₦29,999 | ₦500 |
+| ₦30,000 and above | ₦1,000 |
+
+Paystack's processing charge is assigned to the seller's subaccount, so it is
+deducted from the seller's share in addition to Loop's fee. Buyers pay the
+listed price. This is a native split and follows Paystack's settlement
+schedule; it does not wait for buyer delivery confirmation. Listings awaiting
+checkout are reserved for 20 minutes. If a late payment arrives after the
+listing has been sold to someone else, Loop requests a refund from Paystack.
+Manual refunds and dispute handling still require an operational process.
+
+Paystack must enable the relevant subaccount/split features for Loop's account.
+Start with test keys and verify checkout, webhook delivery, seller onboarding,
+and settlement behavior before using live keys. A test integration does not
+confirm that Paystack has approved the production business model.
+
 ## Features
 
 - PAU-domain accounts, profile-based identity, optional Supabase email
@@ -79,14 +120,14 @@ configuration or tables are missing.
 - Search, category and listing-type filters, price/date sorting, personal
   listings, and listing create/edit/delete.
 - JPEG, PNG, and WebP image uploads (3 MB maximum).
-- Sale, swap, and item-request listings. Sale listings can use the demo
-  checkout; swap and request listings invite users to message and arrange an
-  exchange.
+- Sale, swap, and item-request listings. Paid sale listings use Paystack
+  checkout and a fixed platform/seller split; swap and request listings invite
+  users to message and arrange an exchange.
 - Private buyer/seller conversations with unread counts.
 - Listing reports with an admin review queue; set `LOOP_ADMIN_EMAIL` to the
   account email that should review reports.
-- Recorded demo checkout: listings are marked sold and orders are recorded,
-  but no payment details are collected and no money moves.
+- Paystack checkout and subaccount splits are available when explicitly
+  enabled; free listings do not require payment.
 - Responsive interface and SQLite or Supabase persistence.
 
 ## Deploy to Render
@@ -103,7 +144,11 @@ configuration or tables are missing.
    to use Supabase. Add the requested environment values in Render's
    environment settings:
    `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY`, and
-   `SUPABASE_DB_URL`. Also set `LOOP_ADMIN_EMAIL` if you want a moderator.
+   `SUPABASE_DB_URL`. To enable Paystack test checkout, also set
+   `PAYSTACK_ENABLED=true`, `PAYSTACK_SECRET_KEY`, and `PAYSTACK_CALLBACK_URL`.
+   Set the webhook URL in Paystack to
+   `https://<your-loop-domain>/api/paystack/webhook`. Also set
+   `LOOP_ADMIN_EMAIL` if you want a moderator.
    Use the Supabase session-pooler connection string for Render; store the
    database password only in Render's private environment settings.
 5. Start the deployment after the schema and environment variables are ready.
@@ -119,9 +164,7 @@ started from your Git provider after pushing the project.
 ## Important limitations
 
 This is a prototype, not a production-ready marketplace or independently
-security-audited service. Demo checkout never charges a card or transfers
-money. Do not collect real payment details or rely on this prototype for
-financial transactions. Before a real launch, commission a security review,
-configure operational monitoring/backups and abuse controls, and integrate a
-payment provider through its official server-side SDK and privately managed
-credentials.
+security-audited service. Paystack integration is off by default and requires
+Paystack business approval, test/live credentials, monitoring, and an
+operational refunds/disputes process before launch. Do not use live keys until
+the complete flow has been tested and approved.

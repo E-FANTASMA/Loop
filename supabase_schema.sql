@@ -2,8 +2,12 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
     email text NOT NULL UNIQUE,
     display_name text NOT NULL,
-    created_at timestamptz NOT NULL DEFAULT now()
+    created_at timestamptz NOT NULL DEFAULT now(),
+    paystack_subaccount_code text,
+    paystack_account_name text
 );
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS paystack_subaccount_code text;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS paystack_account_name text;
 
 CREATE OR REPLACE FUNCTION public.handle_new_auth_user()
 RETURNS trigger
@@ -49,8 +53,12 @@ CREATE TABLE IF NOT EXISTS public.listings (
     image_name text,
     status text NOT NULL DEFAULT 'active',
     listing_type text NOT NULL DEFAULT 'sale',
-    swap_for text NOT NULL DEFAULT ''
+    swap_for text NOT NULL DEFAULT '',
+    payment_pending_order_id bigint,
+    reservation_expires_at timestamptz
 );
+ALTER TABLE public.listings ADD COLUMN IF NOT EXISTS payment_pending_order_id bigint;
+ALTER TABLE public.listings ADD COLUMN IF NOT EXISTS reservation_expires_at timestamptz;
 
 CREATE INDEX IF NOT EXISTS listings_status_created_idx
     ON public.listings (status, created_at DESC);
@@ -78,8 +86,20 @@ CREATE TABLE IF NOT EXISTS public.orders (
     seller_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE RESTRICT,
     amount bigint NOT NULL CHECK (amount >= 0),
     status text NOT NULL,
-    created_at timestamptz NOT NULL DEFAULT now()
+    created_at timestamptz NOT NULL DEFAULT now(),
+    payment_reference text,
+    platform_fee bigint NOT NULL DEFAULT 0,
+    paystack_transaction_id text,
+    reservation_expires_at timestamptz,
+    refund_reference text
 );
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS payment_reference text;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS platform_fee bigint NOT NULL DEFAULT 0;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS paystack_transaction_id text;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS reservation_expires_at timestamptz;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS refund_reference text;
+CREATE UNIQUE INDEX IF NOT EXISTS orders_payment_reference_idx
+    ON public.orders (payment_reference) WHERE payment_reference IS NOT NULL;
 CREATE INDEX IF NOT EXISTS orders_buyer_idx ON public.orders (buyer_id, id DESC);
 CREATE INDEX IF NOT EXISTS orders_seller_idx ON public.orders (seller_id, id DESC);
 

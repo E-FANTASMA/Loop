@@ -74,7 +74,7 @@
           </select>
         </label>
       </div>
-      <p class="profile-hint" id="profileHint">Sign in to post, message sellers, or place a demo order.</p>
+      <p class="profile-hint" id="profileHint">Sign in to post, message sellers, or buy an item.</p>
       <div class="listing-grid" id="listingGrid" aria-live="polite"></div>
     </section>
   </main>
@@ -211,9 +211,26 @@
   <div class="modal-backdrop" id="ordersBackdrop" hidden>
     <section class="modal wide-modal" role="dialog" aria-modal="true" aria-labelledby="ordersTitle">
       <button class="modal-close" data-close="ordersBackdrop" aria-label="Close">×</button>
-      <p class="eyebrow">DEMO CHECKOUT</p>
-      <h2 id="ordersTitle">Orders</h2>
-      <p class="demo-notice">Prototype checkout only: no money is collected or transferred.</p>
+      <p class="eyebrow">PAYSTACK CHECKOUT</p>
+      <h2 id="ordersTitle">Orders &amp; payouts</h2>
+      <p class="demo-notice" id="paymentNotice">Buyers pay the listed price. Loop’s fee is split from the seller’s proceeds; Paystack processing fees are charged to the seller.</p>
+      <section class="payout-settings" id="payoutSettings" hidden>
+        <h3>Seller payout account</h3>
+        <p id="payoutAccountStatus" class="modal-intro">Link a Nigerian bank account through Paystack to receive sale proceeds.</p>
+        <form id="payoutAccountForm" hidden>
+          <label>Bank
+            <select name="bank_code" required>
+              <option value="">Choose a bank</option>
+            </select>
+          </label>
+          <label>Account number
+            <input name="account_number" inputmode="numeric" autocomplete="off" maxlength="10" pattern="[0-9]{10}" required>
+            <small>Paystack verifies the account. Loop does not store the account number.</small>
+          </label>
+          <button class="primary-button full-button" type="submit">Link payout account</button>
+        </form>
+        <button class="text-button" id="changePayoutAccount" type="button" hidden>Change payout account</button>
+      </section>
       <div id="ordersList" class="orders-list"></div>
     </section>
   </div>

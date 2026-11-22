@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -12,7 +13,7 @@ from http.cookies import CookieError, SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 import psycopg
@@ -38,6 +39,10 @@ SUPABASE_SECRET_KEY = (
 )
 SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL", "")
 SUPABASE_IMAGE_BUCKET = "loop-listing-images"
+PAYSTACK_ENABLED = os.environ.get("PAYSTACK_ENABLED", "false").strip().lower() == "true"
+PAYSTACK_SECRET_KEY = os.environ.get("PAYSTACK_SECRET_KEY", "").strip()
+PAYSTACK_CALLBACK_URL = os.environ.get("PAYSTACK_CALLBACK_URL", "").strip()
+PAYMENT_RESERVATION_MINUTES = 20
 CATEGORIES = {"Furniture", "Books", "Tech", "Kitchen", "Other"}
 CONDITIONS = {"Like new", "Good", "Fair", "Any"}
 LISTING_TYPES = {"sale", "swap", "request"}
@@ -119,6 +124,13 @@ class SupabaseError(Exception):
         self.message = message
 
 
+class PaystackError(Exception):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
 def supabase_request(
     path, method="GET", payload=None, access_token=None, service_role=False,
     raw_body=None, content_type="application/json",
@@ -161,6 +173,72 @@ def supabase_request(
         raise SupabaseError(502, "Supabase returned an unreadable response.") from error
 
 
+def paystack_request(path, method="GET", payload=None):
+    if not PAYSTACK_ENABLED or not PAYSTACK_SECRET_KEY:
+        raise PaystackError(503, "Paystack payments are not configured.")
+    headers = {
+        "Authorization": f"Bearer {PAYSTACK_SECRET_KEY}",
+        "Accept": "application/json",
+    }
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = Request(f"https://api.paystack.co{path}", data=data, headers=headers, method=method)
+    try:
+        with urlopen(request, timeout=20) as response:
+            body = response.read()
+    except HTTPError as error:
+        try:
+            details = json.loads(error.read().decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            details = {}
+        message = details.get("message") if isinstance(details, dict) else None
+        raise PaystackError(502, message or "Paystack rejected the request.") from error
+    except (URLError, TimeoutError) as error:
+        raise PaystackError(503, "Could not reach Paystack. Please try again.") from error
+    try:
+        result = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PaystackError(502, "Paystack returned an unreadable response.") from error
+    if not isinstance(result, dict) or result.get("status") is not True:
+        message = result.get("message") if isinstance(result, dict) else None
+        raise PaystackError(502, message or "Paystack could not complete the request.")
+    return result.get("data") or {}
+
+
+def platform_fee_for(amount):
+    if amount <= 0:
+        return 0
+    if amount <= 10_000:
+        return 200
+    if amount < 30_000:
+        return 500
+    return 1_000
+
+
+def paystack_split_payload(email, amount, platform_fee, reference, subaccount):
+    return {
+        "email": email,
+        "amount": amount * 100,
+        "currency": "NGN",
+        "reference": reference,
+        "callback_url": PAYSTACK_CALLBACK_URL,
+        "subaccount": subaccount,
+        "transaction_charge": platform_fee * 100,
+        "bearer": "subaccount",
+    }
+
+
+def valid_paystack_signature(raw_body, signature):
+    if not PAYSTACK_SECRET_KEY or not signature:
+        return False
+    expected = hmac.new(
+        PAYSTACK_SECRET_KEY.encode("utf-8"), raw_body, hashlib.sha512
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature.lower())
+
+
 def supabase_image_url(name):
     path = quote(name, safe="/")
     return f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_IMAGE_BUCKET}/{path}"
@@ -173,6 +251,15 @@ def add_column_if_missing(db, table, column, definition):
 
 
 def initialize_db():
+    if PAYSTACK_ENABLED and not PAYSTACK_SECRET_KEY:
+        raise RuntimeError("PAYSTACK_SECRET_KEY is required when PAYSTACK_ENABLED=true.")
+    if PAYSTACK_ENABLED and not PAYSTACK_CALLBACK_URL:
+        raise RuntimeError("PAYSTACK_CALLBACK_URL is required when Paystack payments are enabled.")
+    if PAYSTACK_ENABLED and (
+        urlparse(PAYSTACK_CALLBACK_URL).scheme not in {"http", "https"}
+        or not urlparse(PAYSTACK_CALLBACK_URL).netloc
+    ):
+        raise RuntimeError("PAYSTACK_CALLBACK_URL must be an absolute HTTP or HTTPS URL.")
     if SUPABASE_MODE:
         required = {
             "SUPABASE_URL": SUPABASE_URL,
@@ -187,8 +274,21 @@ def initialize_db():
             with connect_db() as db:
                 for table in ("profiles", "listings", "messages", "orders", "reports"):
                     db.execute(f"SELECT 1 FROM public.{table} LIMIT 0")
-        except psycopg.errors.UndefinedTable as error:
-            raise RuntimeError("Run supabase_schema.sql in the Supabase SQL Editor first.") from error
+                db.execute("""
+                    SELECT paystack_subaccount_code, paystack_account_name
+                    FROM public.profiles LIMIT 0
+                """)
+                db.execute("""
+                    SELECT payment_pending_order_id, reservation_expires_at
+                    FROM public.listings LIMIT 0
+                """)
+                db.execute("""
+                    SELECT payment_reference, platform_fee, paystack_transaction_id,
+                           reservation_expires_at, refund_reference
+                    FROM public.orders LIMIT 0
+                """)
+        except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn) as error:
+            raise RuntimeError("Run the updated supabase_schema.sql in the Supabase SQL Editor first.") from error
         return
     with connect_db() as db:
         db.execute("""
@@ -201,6 +301,8 @@ def initialize_db():
                 created_at TEXT NOT NULL
             )
         """)
+        add_column_if_missing(db, "users", "paystack_subaccount_code", "TEXT")
+        add_column_if_missing(db, "users", "paystack_account_name", "TEXT")
         db.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 token_hash TEXT PRIMARY KEY,
@@ -229,6 +331,8 @@ def initialize_db():
         add_column_if_missing(db, "listings", "status", "TEXT NOT NULL DEFAULT 'active'")
         add_column_if_missing(db, "listings", "listing_type", "TEXT NOT NULL DEFAULT 'sale'")
         add_column_if_missing(db, "listings", "swap_for", "TEXT NOT NULL DEFAULT ''")
+        add_column_if_missing(db, "listings", "payment_pending_order_id", "INTEGER")
+        add_column_if_missing(db, "listings", "reservation_expires_at", "TEXT")
         db.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -248,8 +352,22 @@ def initialize_db():
                 seller_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
                 amount INTEGER NOT NULL CHECK (amount >= 0),
                 status TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                payment_reference TEXT,
+                platform_fee INTEGER NOT NULL DEFAULT 0,
+                paystack_transaction_id TEXT,
+                reservation_expires_at TEXT,
+                refund_reference TEXT
             )
+        """)
+        add_column_if_missing(db, "orders", "payment_reference", "TEXT")
+        add_column_if_missing(db, "orders", "platform_fee", "INTEGER NOT NULL DEFAULT 0")
+        add_column_if_missing(db, "orders", "paystack_transaction_id", "TEXT")
+        add_column_if_missing(db, "orders", "reservation_expires_at", "TEXT")
+        add_column_if_missing(db, "orders", "refund_reference", "TEXT")
+        db.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS orders_payment_reference_idx
+            ON orders (payment_reference) WHERE payment_reference IS NOT NULL
         """)
         db.execute("""
             CREATE TABLE IF NOT EXISTS reports (
@@ -281,6 +399,24 @@ def initialize_db():
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def expire_pending_orders(db):
+    now = utc_now()
+    rows = db.execute("""
+        SELECT id, listing_id FROM orders
+        WHERE status = 'payment_pending' AND reservation_expires_at <= ?
+    """, (now,)).fetchall()
+    for row in rows:
+        db.execute(
+            "UPDATE orders SET status = 'payment_expired' WHERE id = ? AND status = 'payment_pending'",
+            (row["id"],),
+        )
+        db.execute("""
+            UPDATE listings
+            SET status = 'active', payment_pending_order_id = NULL, reservation_expires_at = NULL
+            WHERE id = ? AND payment_pending_order_id = ?
+        """, (row["listing_id"], row["id"]))
 
 
 def json_default(value):
@@ -468,6 +604,8 @@ class LoopHandler(SimpleHTTPRequestHandler):
         try:
             handler()
         except SupabaseError as error:
+            self.send_json({"error": error.message}, error.status)
+        except PaystackError as error:
             self.send_json({"error": error.message}, error.status)
         except (psycopg.Error, sqlite3.Error) as error:
             print(f"Loop database request failed ({type(error).__name__}).")
@@ -673,6 +811,41 @@ class LoopHandler(SimpleHTTPRequestHandler):
         if path == "/api/health":
             self.send_json({"ok": True})
             return
+        if path == "/api/payments/config":
+            self.send_json({"enabled": PAYSTACK_ENABLED})
+            return
+        if path == "/api/paystack/banks":
+            if not self.require_user():
+                return
+            data = paystack_request("/bank?country=nigeria&currency=NGN")
+            banks = [
+                {"name": bank.get("name"), "code": bank.get("code")}
+                for bank in data if isinstance(bank, dict) and bank.get("name") and bank.get("code")
+            ] if isinstance(data, list) else []
+            self.send_json({"banks": banks})
+            return
+        if path == "/api/paystack/payout-account":
+            user = self.require_user()
+            if not user:
+                return
+            profile_table = "profiles" if SUPABASE_MODE else "users"
+            with connect_db() as db:
+                row = db.execute(
+                    f"SELECT paystack_subaccount_code, paystack_account_name FROM {profile_table} WHERE id = ?",
+                    (user["id"],),
+                ).fetchone()
+            self.send_json({
+                "configured": bool(row and row["paystack_subaccount_code"]),
+                "account_name": row["paystack_account_name"] if row else None,
+            })
+            return
+        if path == "/api/payments/verify":
+            user = self.require_user()
+            if not user:
+                return
+            reference = parse_qs(parsed.query).get("reference", [""])[0]
+            self.verify_paystack_order(reference, user["id"])
+            return
         if path == "/api/auth/me":
             session = self.session()
             self.send_json({"user": public_user(session), "csrf_token": session["csrf_token"] if session else None})
@@ -742,6 +915,7 @@ class LoopHandler(SimpleHTTPRequestHandler):
                 values.append(user["id"])
             where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
             with connect_db() as db:
+                expire_pending_orders(db)
                 rows = db.execute(f"SELECT * FROM listings {where} ORDER BY {order}", values).fetchall()
             self.send_json({"listings": [public_listing(row, user["id"] if user else None) for row in rows]})
             return
@@ -762,7 +936,7 @@ class LoopHandler(SimpleHTTPRequestHandler):
                     JOIN listings l ON l.id = m.listing_id
                     JOIN {profile_table} u ON u.id = CASE WHEN m.sender_id = ? THEN m.recipient_id ELSE m.sender_id END
                     WHERE m.sender_id = ? OR m.recipient_id = ?
-                    GROUP BY m.listing_id, other_id
+                    GROUP BY m.listing_id, other_id, l.title, u.display_name
                     ORDER BY last_id DESC
                 """, (user["id"], user["id"], user["id"], user["id"], user["id"])).fetchall()
                 conversations = []
@@ -836,9 +1010,12 @@ class LoopHandler(SimpleHTTPRequestHandler):
         self.handle_api_errors(self._do_POST)
 
     def _do_POST(self):
+        path = urlparse(self.path).path
+        if path == "/api/paystack/webhook":
+            self.handle_paystack_webhook()
+            return
         if self.reject_origin():
             return
-        path = urlparse(self.path).path
         if path == "/api/auth/verify-otp":
             self.handle_verify_otp()
             return
@@ -854,6 +1031,9 @@ class LoopHandler(SimpleHTTPRequestHandler):
                 return
             header = self.clear_session()
             self.send_json({"ok": True}, extra_headers=[header] if header else None)
+            return
+        if path == "/api/paystack/payout-account":
+            self.save_payout_account()
             return
         if path == "/api/listings":
             user = self.require_user()
@@ -1101,9 +1281,11 @@ class LoopHandler(SimpleHTTPRequestHandler):
         except (TypeError, ValueError):
             self.send_json({"error": "Choose a valid listing."}, 400)
             return
+        free_order_id = None
         with connect_db() as db:
             if not SUPABASE_MODE:
                 db.execute("BEGIN IMMEDIATE")
+            expire_pending_orders(db)
             lock = " FOR UPDATE" if SUPABASE_MODE else ""
             listing = db.execute(f"SELECT * FROM listings WHERE id = ?{lock}", (listing_id,)).fetchone()
             if not listing:
@@ -1113,37 +1295,280 @@ class LoopHandler(SimpleHTTPRequestHandler):
                 self.send_json({"error": "You cannot buy your own listing."}, 400)
                 return
             if listing["status"] != "active" or listing["owner_id"] is None:
-                self.send_json({"error": "This sample or sold listing cannot be purchased."}, 409)
+                self.send_json({"error": "This listing is sold or another checkout is in progress."}, 409)
                 return
             if listing["listing_type"] != "sale":
                 self.send_json({"error": "Only sale listings can be purchased. Message the owner to discuss this listing."}, 409)
                 return
             now = utc_now()
-            cursor = db.execute("""
-                INSERT INTO orders (listing_id, buyer_id, seller_id, amount, status, created_at)
-                VALUES (?, ?, ?, ?, 'simulated_paid', ?)
-                RETURNING id
-            """, (listing_id, user["id"], listing["owner_id"], listing["price"], now))
-            update = db.execute(
-                "UPDATE listings SET status = 'sold' WHERE id = ? AND status = 'active'", (listing_id,)
+            if listing["price"] == 0:
+                cursor = db.execute("""
+                    INSERT INTO orders
+                        (listing_id, buyer_id, seller_id, amount, status, created_at, platform_fee)
+                    VALUES (?, ?, ?, 0, 'free_completed', ?, 0)
+                    RETURNING id
+                """, (listing_id, user["id"], listing["owner_id"], now))
+                free_order_id = cursor.fetchone()["id"]
+                db.execute(
+                    "UPDATE listings SET status = 'sold' WHERE id = ? AND status = 'active'",
+                    (listing_id,),
+                )
+            else:
+                if not PAYSTACK_ENABLED:
+                    self.send_json({"error": "Paystack checkout is not enabled yet."}, 503)
+                    return
+                profile_table = "profiles" if SUPABASE_MODE else "users"
+                seller = db.execute(
+                    f"SELECT paystack_subaccount_code FROM {profile_table} WHERE id = ?",
+                    (listing["owner_id"],),
+                ).fetchone()
+                if not seller or not seller["paystack_subaccount_code"]:
+                    self.send_json({"error": "The seller must set up a payout account before checkout."}, 409)
+                    return
+                platform_fee = platform_fee_for(listing["price"])
+                reference = f"loop_{uuid.uuid4().hex}"
+                expires_at = (
+                    datetime.now(timezone.utc)
+                    + timedelta(minutes=PAYMENT_RESERVATION_MINUTES)
+                ).isoformat()
+                cursor = db.execute("""
+                    INSERT INTO orders
+                        (listing_id, buyer_id, seller_id, amount, status, created_at,
+                         payment_reference, platform_fee, reservation_expires_at)
+                    VALUES (?, ?, ?, ?, 'payment_pending', ?, ?, ?, ?)
+                    RETURNING id
+                """, (
+                    listing_id, user["id"], listing["owner_id"], listing["price"],
+                    now, reference, platform_fee, expires_at,
+                ))
+                order_id = cursor.fetchone()["id"]
+                update = db.execute("""
+                    UPDATE listings
+                    SET status = 'payment_pending', payment_pending_order_id = ?,
+                        reservation_expires_at = ?
+                    WHERE id = ? AND status = 'active'
+                """, (order_id, expires_at, listing_id))
+                if update.rowcount != 1:
+                    self.send_json({"error": "This listing is no longer available."}, 409)
+                    return
+                amount = listing["price"]
+                subaccount = seller["paystack_subaccount_code"]
+                email = user["email"]
+        if free_order_id is not None:
+            self.send_json({
+                "order_id": free_order_id,
+                "paid": True,
+                "message": "Free listing reserved.",
+            }, 201)
+            return
+        try:
+            checkout = paystack_request(
+                "/transaction/initialize",
+                method="POST",
+                payload=paystack_split_payload(
+                    email, amount, platform_fee, reference, subaccount
+                ),
             )
-            if update.rowcount != 1:
-                self.send_json({"error": "This listing is no longer available."}, 409)
-                return
-            profile_table = "profiles" if SUPABASE_MODE else "users"
-            order = db.execute(f"""
-                SELECT orders.id, orders.listing_id, orders.amount, orders.status, orders.created_at,
-                       listings.title, sellers.display_name AS seller_name,
-                       buyers.display_name AS buyer_name
-                FROM orders JOIN listings ON listings.id = orders.listing_id
-                JOIN {profile_table} sellers ON sellers.id = orders.seller_id
-                JOIN {profile_table} buyers ON buyers.id = orders.buyer_id
-                WHERE orders.id = ?
-            """, (cursor.fetchone()["id"],)).fetchone()
+        except PaystackError:
+            self.fail_pending_payment(order_id, reference)
+            raise
+        authorization_url = checkout.get("authorization_url")
+        if not authorization_url:
+            self.fail_pending_payment(order_id, reference)
+            raise PaystackError(502, "Paystack did not return a checkout link.")
         self.send_json({
-            "order": dict(order),
-            "notice": "Demo checkout only — no money was charged or transferred.",
+            "order_id": order_id,
+            "reference": reference,
+            "authorization_url": authorization_url,
+            "platform_fee": platform_fee,
         }, 201)
+
+    def save_payout_account(self):
+        user = self.require_user()
+        if not user:
+            return
+        try:
+            payload = self.read_json()
+            bank_code = str(payload.get("bank_code", "")).strip()
+            account_number = str(payload.get("account_number", "")).strip()
+            if not re.fullmatch(r"\d{10}", account_number):
+                raise ValueError("Enter a valid 10-digit Nigerian bank account number.")
+            if not re.fullmatch(r"\d{1,10}", bank_code):
+                raise ValueError("Choose a valid bank.")
+        except (AttributeError, ValueError) as error:
+            self.send_json({"error": str(error)}, 400)
+            return
+        resolved = paystack_request(
+            f"/bank/resolve?{urlencode({'account_number': account_number, 'bank_code': bank_code})}"
+        )
+        account_name = resolved.get("account_name")
+        if not account_name:
+            raise PaystackError(502, "Paystack could not verify that bank account.")
+        subaccount = paystack_request("/subaccount", method="POST", payload={
+            "business_name": f"Loop - {user['display_name']}"[:100],
+            "bank_code": bank_code,
+            "account_number": account_number,
+            "percentage_charge": 0,
+            "primary_contact_email": user["email"],
+            "primary_contact_name": user["display_name"],
+        })
+        subaccount_code = subaccount.get("subaccount_code")
+        if not subaccount_code:
+            raise PaystackError(502, "Paystack did not return a seller subaccount.")
+        profile_table = "profiles" if SUPABASE_MODE else "users"
+        with connect_db() as db:
+            db.execute(
+                f"UPDATE {profile_table} SET paystack_subaccount_code = ?, paystack_account_name = ? WHERE id = ?",
+                (subaccount_code, account_name, user["id"]),
+            )
+        self.send_json({"configured": True, "account_name": account_name}, 201)
+
+    def fail_pending_payment(self, order_id, reference):
+        with connect_db() as db:
+            db.execute("""
+                UPDATE orders SET status = 'payment_failed'
+                WHERE id = ? AND payment_reference = ? AND status = 'payment_pending'
+            """, (order_id, reference))
+            db.execute("""
+                UPDATE listings
+                SET status = 'active', payment_pending_order_id = NULL, reservation_expires_at = NULL
+                WHERE payment_pending_order_id = ?
+            """, (order_id,))
+
+    def verify_paystack_order(self, reference, buyer_id=None):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", reference or ""):
+            raise PaystackError(400, "A valid Paystack reference is required.")
+        with connect_db() as db:
+            order = db.execute(
+                "SELECT * FROM orders WHERE payment_reference = ?", (reference,)
+            ).fetchone()
+        if not order:
+            raise PaystackError(404, "Payment order not found.")
+        if buyer_id is not None and order["buyer_id"] != buyer_id:
+            raise PaystackError(403, "This payment belongs to another account.")
+        transaction = paystack_request(
+            f"/transaction/verify/{quote(reference, safe='')}"
+        )
+        if transaction.get("reference") != reference:
+            raise PaystackError(400, "Paystack returned a mismatched transaction reference.")
+        if transaction.get("status") != "success":
+            self.fail_pending_payment(order["id"], reference)
+            return {"paid": False, "message": "Payment was not completed; the listing is available again."}
+        if transaction.get("currency") != "NGN" or transaction.get("amount") != order["amount"] * 100:
+            raise PaystackError(400, "The verified payment amount or currency does not match the order.")
+        transaction_id = transaction.get("id")
+        if transaction_id is None:
+            raise PaystackError(502, "Paystack did not return a transaction ID.")
+        return self.complete_paystack_order(reference, str(transaction_id))
+
+    def complete_paystack_order(self, reference, transaction_id):
+        with connect_db() as db:
+            if not SUPABASE_MODE:
+                db.execute("BEGIN IMMEDIATE")
+            lock = " FOR UPDATE" if SUPABASE_MODE else ""
+            order = db.execute(
+                f"SELECT * FROM orders WHERE payment_reference = ?{lock}", (reference,)
+            ).fetchone()
+            if not order:
+                raise PaystackError(404, "Payment order not found.")
+            if order["status"] == "paid":
+                return {"paid": True, "message": "Payment confirmed."}
+            if order["status"] == "refunded":
+                return {"paid": False, "refunded": True, "message": "This payment was refunded."}
+            if order["status"] == "refund_pending":
+                transaction_id = order["paystack_transaction_id"] or transaction_id
+                refund_reference = order["refund_reference"] or f"loop_refund_{uuid.uuid4().hex}"
+                db.execute(
+                    "UPDATE orders SET refund_reference = ? WHERE id = ?",
+                    (refund_reference, order["id"]),
+                )
+            else:
+                listing = db.execute(
+                    f"SELECT * FROM listings WHERE id = ?{lock}", (order["listing_id"],)
+                ).fetchone()
+                reserved_for_order = (
+                    listing
+                    and listing["status"] == "payment_pending"
+                    and str(listing["payment_pending_order_id"]) == str(order["id"])
+                )
+                available_after_expiry = listing and listing["status"] == "active"
+                if reserved_for_order or available_after_expiry:
+                    db.execute("""
+                        UPDATE orders
+                        SET status = 'paid', paystack_transaction_id = ?
+                        WHERE id = ?
+                    """, (transaction_id, order["id"]))
+                    db.execute("""
+                        UPDATE listings
+                        SET status = 'sold', payment_pending_order_id = NULL, reservation_expires_at = NULL
+                        WHERE id = ?
+                    """, (order["listing_id"],))
+                    return {"paid": True, "message": "Payment confirmed; the listing is sold."}
+                refund_reference = order["refund_reference"] or f"loop_refund_{uuid.uuid4().hex}"
+                db.execute("""
+                    UPDATE orders
+                    SET status = 'refund_pending', paystack_transaction_id = ?, refund_reference = ?
+                    WHERE id = ?
+                """, (transaction_id, refund_reference, order["id"]))
+        try:
+            refund = paystack_request("/refund", method="POST", payload={
+                "transaction": transaction_id,
+                "reference": refund_reference,
+            })
+        except PaystackError as error:
+            raise PaystackError(
+                503,
+                "This listing is no longer available. Paystack could not confirm the automatic refund; contact support.",
+            ) from error
+        refund_status = refund.get("status")
+        if refund_status == "processed":
+            with connect_db() as db:
+                db.execute(
+                    "UPDATE orders SET status = 'refunded' WHERE payment_reference = ?",
+                    (reference,),
+                )
+            return {"paid": False, "refunded": True, "message": "The listing was no longer available; your payment was refunded."}
+        return {"paid": False, "refunded": False, "message": "The listing was no longer available; your refund is being processed."}
+
+    def handle_paystack_webhook(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.send_json({"error": "Invalid webhook request length."}, 400)
+            return
+        if length < 1 or length > MAX_BODY_SIZE:
+            self.send_json({"error": "Invalid webhook request size."}, 400)
+            return
+        raw_body = self.rfile.read(length)
+        signature = self.headers.get("x-paystack-signature", "")
+        if not valid_paystack_signature(raw_body, signature):
+            self.send_json({"error": "Invalid Paystack webhook signature."}, 401)
+            return
+        try:
+            event = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self.send_json({"error": "Invalid Paystack webhook body."}, 400)
+            return
+        if not isinstance(event, dict):
+            self.send_json({"error": "Invalid Paystack webhook body."}, 400)
+            return
+        event_name = event.get("event")
+        data = event.get("data") or {}
+        reference = data.get("reference") if isinstance(data, dict) else None
+        if event_name == "charge.success" and reference:
+            try:
+                self.verify_paystack_order(reference)
+            except PaystackError as error:
+                if error.status != 404:
+                    raise
+        elif event_name == "charge.failed" and reference:
+            with connect_db() as db:
+                row = db.execute(
+                    "SELECT id FROM orders WHERE payment_reference = ?", (reference,)
+                ).fetchone()
+            if row:
+                self.fail_pending_payment(row["id"], reference)
+        self.send_json({"ok": True})
 
     def handle_report(self):
         user = self.require_user()
@@ -1296,8 +1721,10 @@ class LoopHandler(SimpleHTTPRequestHandler):
     def do_GET_orders(self, user):
         profile_table = "profiles" if SUPABASE_MODE else "users"
         with connect_db() as db:
+            expire_pending_orders(db)
             rows = db.execute(f"""
                 SELECT orders.id, orders.listing_id, orders.amount, orders.status, orders.created_at,
+                       orders.platform_fee,
                        listings.title, sellers.display_name AS seller_name,
                        buyers.display_name AS buyer_name, orders.buyer_id, orders.seller_id
                 FROM orders JOIN listings ON listings.id = orders.listing_id

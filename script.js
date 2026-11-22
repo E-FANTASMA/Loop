@@ -16,6 +16,7 @@ let csrfToken = null;
 let pendingAction = null;
 let currentThread = null;
 let reportListingId = null;
+let paymentsEnabled = false;
 let searchTimer;
 
 function formatPrice(price) {
@@ -93,7 +94,7 @@ function updateProfileUI() {
   } else {
     button.textContent = "Sign in";
     button.setAttribute("aria-label", "Sign in or create an account");
-    hint.textContent = "Sign in to post, message sellers, or place a demo order.";
+    hint.textContent = "Sign in to post, message sellers, or buy an item.";
   }
   document.getElementById("moderationNav").hidden = !currentUser?.is_admin;
 }
@@ -186,9 +187,17 @@ function makeListingCard(item) {
       openConversation(item.id, item.owner_id, item.title, item.seller_name)));
     actions.append(message);
     if (item.listing_type === "sale") {
-      const buy = makeElement("button", "small-button contact-button", item.price ? "Demo checkout" : "Reserve for free");
+      const hasPrice = Number(item.price) > 0;
+      const buy = makeElement(
+        "button",
+        "small-button contact-button",
+        hasPrice ? (paymentsEnabled ? "Pay with Paystack" : "Payments unavailable") : "Reserve for free"
+      );
       buy.type = "button";
-      buy.addEventListener("click", () => requireAuth(() => placeDemoOrder(item)));
+      buy.disabled = hasPrice && !paymentsEnabled;
+      if (!hasPrice || paymentsEnabled) {
+        buy.addEventListener("click", () => requireAuth(() => placeOrder(item)));
+      }
       actions.append(buy);
     }
     const report = makeElement("button", "small-button secondary-button", "Report");
@@ -320,14 +329,21 @@ async function deleteListing(item) {
   }
 }
 
-async function placeDemoOrder(item) {
-  if (!window.confirm(`Continue with demo checkout for ${formatPrice(item.price)}?\n\nThis records a test order only. No money will be charged.`)) return;
+async function placeOrder(item) {
+  const prompt = item.price
+    ? `Continue to Paystack to pay ${formatPrice(item.price)}?`
+    : `Reserve "${item.title}" for free?`;
+  if (!window.confirm(prompt)) return;
   try {
     const result = await request("/orders", {
       method: "POST",
       body: JSON.stringify({ listing_id: item.id })
     });
-    toast(result.notice);
+    if (result.authorization_url) {
+      window.location.assign(result.authorization_url);
+      return;
+    }
+    toast(result.message);
     await renderListings();
     await updateStats();
   } catch (error) {
@@ -415,20 +431,80 @@ async function renderOrders() {
   container.replaceChildren(makeElement("p", "loading-message", "Loading orders…"));
   try {
     const result = await request("/orders");
+    await renderPayoutSettings();
     if (!result.orders.length) {
-      container.replaceChildren(makeElement("p", "empty-message", "No demo orders yet."));
+      container.replaceChildren(makeElement("p", "empty-message", "No orders yet."));
       return;
     }
     container.replaceChildren(...result.orders.map(order => {
       const row = makeElement("article", "order-item");
+      const status = {
+        payment_pending: "Awaiting payment",
+        payment_expired: "Checkout expired",
+        payment_failed: "Payment failed",
+        paid: "Paid by Paystack",
+        free_completed: "Reserved for free",
+        refund_pending: "Refund processing",
+        refunded: "Refunded"
+      }[order.status] || order.status;
       row.append(makeElement("strong", "", order.title),
         makeElement("span", "", `${formatPrice(order.amount)} · ${order.buyer_id === currentUser.id ? `Bought from ${order.seller_name}` : `Sold to ${order.buyer_name}`}`),
-        makeElement("small", "", `SIMULATED · ${formatDate(order.created_at)}`));
+        makeElement("small", "", `${status} · ${formatDate(order.created_at)}`));
+      if (order.seller_id === currentUser.id && order.platform_fee > 0) {
+        row.append(makeElement("small", "", `Loop fee ${formatPrice(order.platform_fee)}; Paystack processing fee is deducted from the seller share.`));
+      }
       return row;
     }));
   } catch (error) {
     container.replaceChildren(makeElement("p", "empty-message", error.message));
   }
+}
+
+async function renderPayoutSettings() {
+  const section = document.getElementById("payoutSettings");
+  const form = document.getElementById("payoutAccountForm");
+  const status = document.getElementById("payoutAccountStatus");
+  const changeButton = document.getElementById("changePayoutAccount");
+  section.hidden = !paymentsEnabled;
+  if (!paymentsEnabled) return;
+  try {
+    const account = await request("/paystack/payout-account");
+    if (account.configured) {
+      status.textContent = `Linked to ${account.account_name}. The account number is held by Paystack.`;
+      form.hidden = true;
+      changeButton.hidden = false;
+      return;
+    }
+    status.textContent = "Link a Nigerian bank account through Paystack before selling.";
+    form.hidden = false;
+    changeButton.hidden = true;
+    const bankSelect = form.elements.bank_code;
+    if (bankSelect.options.length === 1) {
+      const result = await request("/paystack/banks");
+      for (const bank of result.banks) {
+        bankSelect.add(new Option(bank.name, bank.code));
+      }
+    }
+  } catch (error) {
+    status.textContent = error.message;
+    form.hidden = true;
+    changeButton.hidden = true;
+  }
+}
+
+async function handlePaystackReturn() {
+  const params = new URLSearchParams(window.location.search);
+  const reference = params.get("reference");
+  if (!reference) return;
+  window.history.replaceState({}, "", window.location.pathname + window.location.hash);
+  try {
+    const result = await request(`/payments/verify?reference=${encodeURIComponent(reference)}`);
+    toast(result.message, !result.paid && !result.refunded);
+  } catch (error) {
+    toast(error.message, true);
+  }
+  await renderListings();
+  await updateStats();
 }
 
 function openReportForm(item) {
@@ -682,6 +758,46 @@ document.getElementById("reportForm").addEventListener("submit", async event => 
   }
 });
 
+document.getElementById("payoutAccountForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('[type="submit"]');
+  button.disabled = true;
+  try {
+    const result = await request("/paystack/payout-account", {
+      method: "POST",
+      body: JSON.stringify(Object.fromEntries(new FormData(form)))
+    });
+    form.reset();
+    document.getElementById("payoutAccountStatus").textContent =
+      `Linked to ${result.account_name}. The account number is held by Paystack.`;
+    form.hidden = true;
+    document.getElementById("changePayoutAccount").hidden = false;
+    toast("Payout account linked through Paystack.");
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+document.getElementById("changePayoutAccount").addEventListener("click", async () => {
+  const form = document.getElementById("payoutAccountForm");
+  form.hidden = false;
+  document.getElementById("changePayoutAccount").hidden = true;
+  const bankSelect = form.elements.bank_code;
+  if (bankSelect.options.length === 1) {
+    try {
+      const result = await request("/paystack/banks");
+      for (const bank of result.banks) {
+        bankSelect.add(new Option(bank.name, bank.code));
+      }
+    } catch (error) {
+      document.getElementById("payoutAccountStatus").textContent = error.message;
+    }
+  }
+});
+
 document.getElementById("messageForm").addEventListener("submit", async event => {
   event.preventDefault();
   if (!currentThread) return;
@@ -729,9 +845,16 @@ document.addEventListener("keydown", event => {
 });
 
 setAuthMode("login");
-refreshSession().then(() => {
+refreshSession().then(async () => {
+  try {
+    const config = await request("/payments/config");
+    paymentsEnabled = Boolean(config.enabled);
+  } catch (error) {
+    console.error(error);
+  }
   renderListings();
   updateStats();
   updateUnreadBadge();
+  await handlePaystackReturn();
 });
 window.setInterval(updateUnreadBadge, 25000);
