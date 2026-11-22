@@ -101,17 +101,31 @@ function updateProfileUI() {
 function setAuthMode(mode) {
   authMode = mode;
   const registering = mode === "register";
-  document.getElementById("authTitle").textContent = registering ? "Join Loop" : "Welcome back";
-  document.getElementById("authIntro").textContent = registering
-    ? "Create an account to trade with your campus community."
-    : "Sign in to manage listings and message the community.";
+  const verifying = mode === "verify";
+  document.getElementById("authTitle").textContent = verifying
+    ? "Verify your email"
+    : registering ? "Join Loop" : "Welcome back";
+  document.getElementById("authIntro").textContent = verifying
+    ? "Enter the 6-digit code sent to your PAU email."
+    : registering
+      ? "Create an account to trade with your campus community."
+      : "Sign in to manage listings and message the community.";
   document.getElementById("nameField").hidden = !registering;
   authForm.elements.display_name.required = registering;
+  document.getElementById("passwordField").hidden = verifying;
+  authForm.elements.password.required = !verifying;
   authForm.elements.password.autocomplete = registering ? "new-password" : "current-password";
-  document.getElementById("authSubmit").textContent = registering ? "Create account" : "Sign in";
-  document.getElementById("authToggle").textContent = registering
-    ? "Already have an account? Sign in"
-    : "New to Loop? Create an account";
+  document.getElementById("otpField").hidden = !verifying;
+  authForm.elements.otp.required = verifying;
+  authForm.elements.email.readOnly = verifying;
+  document.getElementById("authSubmit").textContent = verifying
+    ? "Verify email"
+    : registering ? "Create account" : "Sign in";
+  document.getElementById("authToggle").textContent = verifying
+    ? "Use a different email"
+    : registering
+      ? "Already have an account? Sign in"
+      : "New to Loop? Create an account";
 }
 
 async function refreshSession() {
@@ -548,23 +562,34 @@ document.getElementById("profileButton").addEventListener("click", async () => {
   }
 });
 
-document.getElementById("authToggle").addEventListener("click", () =>
-  setAuthMode(authMode === "login" ? "register" : "login"));
+document.getElementById("authToggle").addEventListener("click", () => {
+  if (authMode === "verify") {
+    authForm.elements.otp.value = "";
+    setAuthMode("login");
+  } else {
+    setAuthMode(authMode === "login" ? "register" : "login");
+  }
+});
 authForm.addEventListener("submit", async event => {
   event.preventDefault();
   const button = document.getElementById("authSubmit");
   button.disabled = true;
   const payload = Object.fromEntries(new FormData(authForm));
   try {
-    const result = await request(`/auth/${authMode === "register" ? "register" : "login"}`, {
+    const verifying = authMode === "verify";
+    const result = await request(verifying ? "/auth/verify-otp" : `/auth/${authMode === "register" ? "register" : "login"}`, {
       method: "POST",
-      body: JSON.stringify(payload)
+      body: JSON.stringify(verifying
+        ? { email: payload.email, token: payload.otp }
+        : payload)
     });
     if (result.verification_required) {
-      authForm.reset();
-      setAuthMode("login");
+      authForm.elements.password.value = "";
+      authForm.elements.otp.value = "";
+      setAuthMode("verify");
       document.getElementById("authIntro").textContent = result.message;
-      toast("Check your PAU email to verify your account.");
+      authForm.elements.otp.focus();
+      toast("Check your PAU email for the 6-digit code.");
       return;
     }
     currentUser = result.user;
@@ -572,7 +597,11 @@ authForm.addEventListener("submit", async event => {
     updateProfileUI();
     authBackdrop.hidden = true;
     authForm.reset();
-    toast(authMode === "register" ? "Your account is ready." : "Welcome back.");
+    const completedMode = authMode;
+    setAuthMode("login");
+    toast(completedMode === "register"
+      ? "Your account is ready."
+      : completedMode === "verify" ? "Your email is verified." : "Welcome back.");
     const action = pendingAction;
     pendingAction = null;
     if (action) await action();

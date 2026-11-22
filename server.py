@@ -836,6 +836,9 @@ class LoopHandler(SimpleHTTPRequestHandler):
         if self.reject_origin():
             return
         path = urlparse(self.path).path
+        if path == "/api/auth/verify-otp":
+            self.handle_verify_otp()
+            return
         if path == "/api/auth/register":
             self.handle_register()
             return
@@ -924,7 +927,7 @@ class LoopHandler(SimpleHTTPRequestHandler):
             if not access_token or not refresh_token:
                 self.send_json({
                     "verification_required": True,
-                    "message": "Check your PAU email for a verification link, then sign in.",
+                    "message": "Check your PAU email for the 6-digit code, then enter it here.",
                 }, 202)
                 return
             csrf = self.set_supabase_session(result)
@@ -949,6 +952,37 @@ class LoopHandler(SimpleHTTPRequestHandler):
             "user": public_user({"id": user_id, "email": email, "display_name": name}),
             "csrf_token": csrf,
         }, 201, [cookie])
+
+    def handle_verify_otp(self):
+        if not SUPABASE_MODE:
+            self.send_json({"error": "Email code verification requires Supabase Auth."}, 400)
+            return
+        try:
+            payload = self.read_json()
+            if not isinstance(payload, dict):
+                raise ValueError("Request body must be a JSON object.")
+            email = validate_email(payload.get("email"))
+            token = clean_text(payload.get("token"), "Verification code", maximum=6)
+            if not re.fullmatch(r"[0-9]{6}", token):
+                raise ValueError("Enter the 6-digit code from your email.")
+        except ValueError as error:
+            self.send_json({"error": str(error)}, 400)
+            return
+        try:
+            result = supabase_request(
+                "/auth/v1/verify",
+                method="POST",
+                payload={"email": email, "token": token, "type": "email"},
+            )
+        except SupabaseError as error:
+            self.send_json({"error": error.message}, error.status)
+            return
+        auth_user = result.get("user")
+        if not auth_user or not result.get("access_token") or not result.get("refresh_token"):
+            self.send_json({"error": "Supabase did not return a verified login session."}, 502)
+            return
+        csrf = self.set_supabase_session(result)
+        self.send_json({"user": self.supabase_public_user(auth_user), "csrf_token": csrf})
 
     def handle_login(self):
         try:

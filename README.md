@@ -44,11 +44,20 @@ in its password. Keep the database password and service-role key private.
    Never put the secret key or database connection string in browser code,
    source control, or a public chat. On Render, set the values as private
    environment variables in the service settings.
-5. In Supabase Auth settings, set the application Site URL and allowed redirect
-   URLs to the app's real address. Enable email confirmation and configure
-   email delivery if you want users to verify their mailbox. Loop always
-   restricts registration and login to `@pau.edu.ng`; Supabase Auth handles
-   password storage, sessions, and optional verification.
+5. In Supabase **Authentication → Email Templates → Confirm signup**, replace
+   the confirmation-link template with a code, for example:
+
+   ```html
+   <h2>Verify your Loop account</h2>
+   <p>Enter this 6-digit code in Loop: {{ .Token }}</p>
+   ```
+
+   Do not include `{{ .ConfirmationURL }}` in that template. Loop submits the
+   code to Supabase Auth for verification, so signup no longer redirects users
+   to a localhost link. Set the Supabase Auth Site URL to the deployed app URL
+   as well, and configure email delivery. OTP emails remain subject to
+   Supabase's email rate limits. Loop restricts registration and login to
+   `@pau.edu.ng`; Supabase Auth handles password storage and sessions.
 
 The app's server uses the Postgres connection string and secret key only
 on the server. Browser requests continue to go through the Loop API. The
