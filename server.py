@@ -99,6 +99,8 @@ class PostgresConnection:
 
 
 def postgres_row(cursor):
+    if cursor.description is None:
+        return tuple
     columns = [column.name for column in cursor.description]
 
     def make_row(values):
