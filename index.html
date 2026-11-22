@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#174936">
+  <title>Loop — Campus Exchange</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#" aria-label="Loop home">
+      <span class="brand-mark" aria-hidden="true">↻</span><span>loop</span>
+    </a>
+    <nav aria-label="Primary navigation">
+      <button class="nav-link active" id="discoverNav">Discover</button>
+      <button class="nav-link" id="myListingsNav">My listings</button>
+      <button class="nav-link" id="inboxNav">Inbox <span class="nav-badge" id="unreadCount" hidden></span></button>
+      <button class="nav-link" id="ordersNav">Orders</button>
+      <button class="nav-link" id="moderationNav" hidden>Moderation</button>
+    </nav>
+    <div class="header-actions">
+      <button class="account-button" id="profileButton">Sign in</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">YOUR CAMPUS, IN CIRCULATION</p>
+        <h1>Give good things<br>another <em>go.</em></h1>
+        <p class="hero-copy">Find what you need, share what you do not, and keep useful items moving around campus.</p>
+      </div>
+      <div class="impact-card">
+        <p>Loop community</p>
+        <strong id="impactCount">0</strong>
+        <span>active listings</span>
+        <div class="impact-bar"><span></span></div>
+      </div>
+    </section>
+
+    <section class="browse" aria-labelledby="browse-heading">
+      <div class="toolbar">
+        <div class="search-box">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+          <input id="searchInput" type="search" placeholder="Search campus listings" aria-label="Search listings">
+        </div>
+        <button class="primary-button" id="newListingButton"><span aria-hidden="true">＋</span> Post a listing</button>
+      </div>
+
+      <div class="filters type-filters" aria-label="Filter by listing type">
+        <button class="filter active" data-type="All">All types</button>
+        <button class="filter" data-type="sale">For sale</button>
+        <button class="filter" data-type="swap">Swap</button>
+        <button class="filter" data-type="request">Requested</button>
+      </div>
+
+      <div class="filters category-filters" aria-label="Filter listings">
+        <button class="filter active" data-category="All">All</button>
+        <button class="filter" data-category="Furniture">Furniture</button>
+        <button class="filter" data-category="Books">Books</button>
+        <button class="filter" data-category="Tech">Tech</button>
+        <button class="filter" data-category="Kitchen">Kitchen</button>
+        <button class="filter" data-category="Other">Other</button>
+      </div>
+
+      <div class="section-heading">
+        <h2 id="browse-heading">Available near you</h2>
+        <label class="sort-label">Sort
+          <select class="sort-select" id="sortSelect" aria-label="Sort listings">
+            <option value="newest">Newest first</option>
+            <option value="price_asc">Price: low to high</option>
+            <option value="price_desc">Price: high to low</option>
+          </select>
+        </label>
+      </div>
+      <p class="profile-hint" id="profileHint">Sign in to post, message sellers, or place a demo order.</p>
+      <div class="listing-grid" id="listingGrid" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <div class="modal-backdrop" id="authBackdrop" hidden>
+    <section class="modal auth-modal" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+      <button class="modal-close" data-close="authBackdrop" aria-label="Close">×</button>
+      <p class="eyebrow">LOOP ACCOUNT</p>
+      <h2 id="authTitle">Welcome back</h2>
+      <p class="modal-intro" id="authIntro">Sign in to manage listings and message the community.</p>
+      <form id="authForm">
+        <label id="nameField" hidden>Your name
+          <input name="display_name" maxlength="60" autocomplete="name">
+        </label>
+        <label>Email
+          <input name="email" type="email" required maxlength="254" autocomplete="email"
+                 pattern="[^@\s]+@pau\.edu\.ng" title="Use your PAU email address ending in @pau.edu.ng"
+                 placeholder="you@pau.edu.ng">
+          <small>Use your PAU email ending in @pau.edu.ng.</small>
+        </label>
+        <label>Password
+          <input name="password" type="password" required minlength="12" maxlength="128" autocomplete="current-password">
+          <small>Use at least 12 characters.</small>
+        </label>
+        <button class="primary-button full-button" type="submit" id="authSubmit">Sign in</button>
+      </form>
+      <button class="text-button" id="authToggle" type="button">New to Loop? Create an account</button>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="listingBackdrop" hidden>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="listingModalTitle">
+      <button class="modal-close" data-close="listingBackdrop" aria-label="Close">×</button>
+      <p class="eyebrow" id="formEyebrow">NEW LISTING</p>
+      <h2 id="listingModalTitle">Share an item</h2>
+      <form id="listingForm">
+        <label>Item name
+          <input name="title" required maxlength="100" placeholder="e.g. Desk lamp or item you need">
+        </label>
+        <label>Description
+          <textarea name="description" rows="3" maxlength="600" placeholder="Condition, details, or anything a buyer should know"></textarea>
+        </label>
+        <label>Listing type
+          <select name="listing_type" id="listingTypeSelect" required>
+            <option value="sale">For sale</option>
+            <option value="swap">Swap</option>
+            <option value="request">Request an item</option>
+          </select>
+        </label>
+        <p class="listing-type-hint" id="listingTypeHint">Set a price in naira, or enter 0 to give it away.</p>
+        <div class="form-row">
+          <label>Category
+            <select name="category" required>
+              <option>Furniture</option><option>Books</option><option>Tech</option><option>Kitchen</option><option>Other</option>
+            </select>
+          </label>
+          <label>Condition
+            <select name="condition" required>
+              <option>Like new</option><option>Good</option><option>Fair</option><option>Any</option>
+            </select>
+          </label>
+        </div>
+        <div class="form-row">
+          <label id="priceField">Price (NGN)
+            <input name="price" type="number" min="0" max="100000000" step="1" value="0" required>
+            <small>Enter 0 for free</small>
+          </label>
+          <label id="swapField" hidden>Wanted in exchange
+            <input name="swap_for" maxlength="200" placeholder="e.g. Desk lamp or books">
+          </label>
+          <label>Pickup location
+            <input name="location" required maxlength="100" placeholder="e.g. Student Union">
+          </label>
+        </div>
+        <label>Item photo <span class="optional">(optional, JPEG / PNG / WebP, max 3 MB)</span>
+          <input name="image" type="file" accept="image/jpeg,image/png,image/webp">
+        </label>
+        <img id="imagePreview" class="image-preview" alt="Selected listing photo" hidden>
+        <button class="primary-button full-button" type="submit">Publish listing</button>
+        <button class="text-button" type="button" data-close="listingBackdrop">Cancel</button>
+      </form>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="inboxBackdrop" hidden>
+    <section class="modal wide-modal" role="dialog" aria-modal="true" aria-labelledby="inboxTitle">
+      <button class="modal-close" data-close="inboxBackdrop" aria-label="Close">×</button>
+      <p class="eyebrow">YOUR LOOP</p>
+      <h2 id="inboxTitle">Inbox</h2>
+      <div id="conversationView">
+        <div id="conversationList" class="conversation-list"></div>
+      </div>
+      <div id="threadView" hidden>
+        <button class="text-button back-button" id="backToInbox" type="button">← All conversations</button>
+        <h3 id="threadHeading"></h3>
+        <div id="messageList" class="message-list" aria-live="polite"></div>
+        <form id="messageForm" class="message-form">
+          <textarea name="body" rows="2" maxlength="1200" required placeholder="Write a message…"></textarea>
+          <button class="primary-button" type="submit">Send</button>
+        </form>
+      </div>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="reportBackdrop" hidden>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="reportTitle">
+      <button class="modal-close" data-close="reportBackdrop" aria-label="Close">×</button>
+      <p class="eyebrow">COMMUNITY SAFETY</p>
+      <h2 id="reportTitle">Report listing</h2>
+      <p class="modal-intro" id="reportListingTitle"></p>
+      <form id="reportForm">
+        <label>Reason
+          <select name="reason" required>
+            <option value="spam">Spam or misleading</option>
+            <option value="fraud">Suspected fraud</option>
+            <option value="prohibited">Prohibited item</option>
+            <option value="other">Other concern</option>
+          </select>
+        </label>
+        <label>Details <span class="optional">(optional)</span>
+          <textarea name="details" rows="3" maxlength="500" placeholder="Tell moderators what you noticed"></textarea>
+        </label>
+        <button class="primary-button full-button" type="submit">Submit report</button>
+        <button class="text-button" type="button" data-close="reportBackdrop">Cancel</button>
+      </form>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="ordersBackdrop" hidden>
+    <section class="modal wide-modal" role="dialog" aria-modal="true" aria-labelledby="ordersTitle">
+      <button class="modal-close" data-close="ordersBackdrop" aria-label="Close">×</button>
+      <p class="eyebrow">DEMO CHECKOUT</p>
+      <h2 id="ordersTitle">Orders</h2>
+      <p class="demo-notice">Prototype checkout only: no money is collected or transferred.</p>
+      <div id="ordersList" class="orders-list"></div>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="moderationBackdrop" hidden>
+    <section class="modal wide-modal" role="dialog" aria-modal="true" aria-labelledby="moderationTitle">
+      <button class="modal-close" data-close="moderationBackdrop" aria-label="Close">×</button>
+      <p class="eyebrow">ADMIN REVIEW</p>
+      <h2 id="moderationTitle">Listing reports</h2>
+      <p class="modal-intro">Review reports, then hide the listing or dismiss the report.</p>
+      <div id="reportsList" class="orders-list"></div>
+    </section>
+  </div>
+
+  <div class="toast" id="toast" role="status"></div>
+  <script src="script.js"></script>
+</body>
+</html>
